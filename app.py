@@ -1,26 +1,51 @@
+import streamlit as st
 from transformers import pipeline
+import pandas as pd
 import re
+import os
+
+# Fix tokenizer warning
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # -----------------------------
-# LOAD MODELS
+# PAGE CONFIG
 # -----------------------------
-print("Loading models...")
-
-classifier = pipeline(
-    "sentiment-analysis",
-    model="distilbert-base-uncased-finetuned-sst-2-english"
+st.set_page_config(
+    page_title="AI Bullying Detection System",
+    page_icon="🛡️",
+    layout="centered"
 )
 
-# ✅ FIXED summarizer (works in your environment)
-summarizer = pipeline(
-    "text-generation",
-    model="google/flan-t5-base"
-)
+# -----------------------------
+# LOAD MODELS (LIGHTWEIGHT)
+# -----------------------------
+@st.cache_resource
+def load_models():
+    classifier = pipeline(
+        "sentiment-analysis",
+        model="distilbert-base-uncased-finetuned-sst-2-english"
+    )
 
-print("Models loaded!\n")
+    summarizer = pipeline(
+        "text-generation",
+        model="google/flan-t5-small"   # ⚡ faster + deploy-safe
+    )
+
+    return classifier, summarizer
+
+classifier, summarizer = load_models()
 
 # -----------------------------
-# 1. PII MASKING
+# SIDEBAR
+# -----------------------------
+st.sidebar.title("⚙️ Settings")
+st.sidebar.write("AI-powered bullying detection system")
+
+frequency = st.sidebar.slider("Frequency", 1, 10, 1)
+duration = st.sidebar.slider("Duration", 1, 10, 1)
+
+# -----------------------------
+# FUNCTIONS
 # -----------------------------
 def mask_pii(text):
     text = re.sub(r'\b[A-Z][a-z]{2,}\b', '[NAME]', text)
@@ -28,29 +53,20 @@ def mask_pii(text):
     text = re.sub(r'\S+@\S+', '[EMAIL]', text)
     return text
 
-# -----------------------------
-# 2. BULLYING TYPE
-# -----------------------------
 def classify_type(text):
     text = text.lower()
 
     if any(w in text for w in ["kill", "hurt", "beat", "threat"]):
         return "Threats"
-
     elif any(w in text for w in ["ignore", "exclude", "left out"]):
         return "Social Exclusion"
-
     elif any(w in text for w in ["touch", "body", "sexual"]):
         return "Sexual"
-
     elif any(w in text for w in ["ugly", "stupid", "loser", "idiot"]):
         return "Verbal"
 
     return "Verbal"
 
-# -----------------------------
-# 3. SEVERITY
-# -----------------------------
 def calculate_severity(toxicity_score, frequency, duration):
     score = (toxicity_score * 0.5) + (frequency * 0.3) + (duration * 0.2)
 
@@ -60,79 +76,82 @@ def calculate_severity(toxicity_score, frequency, duration):
         return "MEDIUM"
     return "LOW"
 
-# -----------------------------
-# 4. ACTION
-# -----------------------------
 def recommend_action(b_type, severity):
-
     if b_type == "Sexual":
         return "Mandatory escalation (Protocol Section D)"
-
     if b_type == "Threats" and severity == "HIGH":
         return "Immediate escalation (Protocol Section C)"
-
     if severity == "MEDIUM":
         return "Counselor session (Protocol Section B)"
-
     return "Monitor situation (Protocol Section A)"
 
-# -----------------------------
-# 5. SUMMARY (FLAN-T5 BASED)
-# -----------------------------
 def generate_summary(text):
     try:
-        prompt = f"Summarize this bullying report clearly:\n{text}"
-
-        result = summarizer(
-            prompt,
-            max_length=100,
-            do_sample=False
-        )
-
+        prompt = f"Summarize this bullying report:\n{text}"
+        result = summarizer(prompt, max_length=80, do_sample=False)
         return result[0]['generated_text']
     except:
         return "Summary not available"
 
 # -----------------------------
-# MAIN PIPELINE
+# UI MAIN
 # -----------------------------
-def analyze_report(text, frequency=1, duration=1):
+st.title("🛡️ AI Bullying Detection System")
+st.markdown("### Analyze reports using AI")
 
-    # Step 1: Mask PII
-    clean_text = mask_pii(text)
+text = st.text_area("📝 Enter Complaint / Report")
 
-    # Step 2: Toxicity
-    result = classifier(clean_text)[0]
-    toxicity_score = result['score'] if result['label'] == 'NEGATIVE' else 0
+if st.button("🔍 Analyze Report"):
 
-    # Step 3: Type
-    b_type = classify_type(clean_text)
+    if text.strip() == "":
+        st.warning("Please enter some text")
+    else:
+        clean_text = mask_pii(text)
 
-    # Step 4: Severity
-    severity = calculate_severity(toxicity_score, frequency, duration)
+        result = classifier(clean_text)[0]
+        toxicity_score = result['score'] if result['label'] == 'NEGATIVE' else 0
 
-    # Step 5: Summary
-    summary = generate_summary(clean_text)
+        b_type = classify_type(clean_text)
+        severity = calculate_severity(toxicity_score, frequency, duration)
+        summary = generate_summary(clean_text)
+        action = recommend_action(b_type, severity)
 
-    # Step 6: Action
-    action = recommend_action(b_type, severity)
+        # -----------------------------
+        # DISPLAY RESULTS
+        # -----------------------------
+        st.subheader("📊 Analysis Results")
 
-    return {
-        "Masked_Text": clean_text,
-        "Toxicity_Score": round(toxicity_score, 2),
-        "Bullying_Type": b_type,
-        "Severity": severity,
-        "Summary": summary,
-        "Recommended_Action": action
-    }
+        st.write("**Masked Text:**", clean_text)
+        st.write("**Toxicity Score:**", round(toxicity_score, 2))
+        st.write("**Bullying Type:**", b_type)
 
-# -----------------------------
-# TEST RUN
-# -----------------------------
-text = "Rahul keeps calling me stupid and threatening to beat me every day. Contact me at 9876543210."
+        # Severity color
+        if severity == "HIGH":
+            st.error(f"🚨 Severity: {severity}")
+        elif severity == "MEDIUM":
+            st.warning(f"⚠️ Severity: {severity}")
+        else:
+            st.success(f"✅ Severity: {severity}")
 
-output = analyze_report(text, frequency=5, duration=7)
+        st.write("**Summary:**", summary)
+        st.write("**Recommended Action:**", action)
 
-print("\n--- ANALYSIS RESULT ---\n")
-for k, v in output.items():
-    print(f"{k}: {v}")
+        # -----------------------------
+        # DOWNLOAD REPORT
+        # -----------------------------
+        data = {
+            "Text": [text],
+            "Masked": [clean_text],
+            "Type": [b_type],
+            "Severity": [severity],
+            "Action": [action]
+        }
+
+        df = pd.DataFrame(data)
+
+        st.download_button(
+            label="📥 Download Report (CSV)",
+            data=df.to_csv(index=False),
+            file_name="bullying_report.csv",
+            mime="text/csv"
+        )
