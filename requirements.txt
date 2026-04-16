@@ -1,6 +1,6 @@
 streamlit
 pandas
-easyocr
 requests
 pillow
 numpy
+easyocr
