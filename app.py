@@ -1,27 +1,16 @@
 import streamlit as st
-from transformers import pipeline
-import re
+import requests
 import sqlite3
+import re
+import smtplib
 from datetime import datetime
 
-st.set_page_config(page_title="Cyberbullying AI", layout="wide")
-
-# ---------------- STYLE ----------------
-st.markdown("""
-    <style>
-    .main {background-color: #0E1117;}
-    h1 {color: #FF4B4B;}
-    </style>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="Cyberbullying Assistant", layout="wide")
 
 st.title("🚨 Cyberbullying Incident Response Assistant")
 
-# ---------------- MODEL ----------------
-@st.cache_resource
-def load_model():
-    return pipeline("sentiment-analysis")
-
-classifier = load_model()
+# ---------------- CONFIG ----------------
+HF_API_KEY = "YOUR_HUGGINGFACE_API_KEY"
 
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("reports.db", check_same_thread=False)
@@ -31,7 +20,11 @@ cursor.execute("""
 CREATE TABLE IF NOT EXISTS reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     text TEXT,
+    type TEXT,
+    toxicity REAL,
+    emotion TEXT,
     severity TEXT,
+    frequency TEXT,
     summary TEXT,
     action TEXT,
     timestamp TEXT
@@ -40,18 +33,65 @@ CREATE TABLE IF NOT EXISTS reports (
 conn.commit()
 
 # ---------------- FUNCTIONS ----------------
+
+# OCR (cloud-safe placeholder)
+def extract_text_from_image(image):
+    return "Extracted text from image (OCR placeholder)"
+
+# Anonymization
 def anonymize(text):
     text = re.sub(r'\b[A-Z][a-z]{2,}\b', '[REDACTED]', text)
     text = re.sub(r'\d{10}', '[REDACTED]', text)
+    text = re.sub(r'\S+@\S+', '[REDACTED]', text)
     return text
 
-def calculate_severity(label, score):
-    if label == "NEGATIVE" and score > 0.7:
+# HuggingFace Toxicity
+def get_toxicity(text):
+    API_URL = "https://api-inference.huggingface.co/models/unitary/toxic-bert"
+    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+    response = requests.post(API_URL, headers=headers, json={"inputs": text})
+    try:
+        return response.json()[0][0]["score"]
+    except:
+        return 0.5
+
+# Emotion (simple keyword logic for stability)
+def get_emotion(text):
+    text = text.lower()
+    if "angry" in text or "hate" in text:
+        return "anger"
+    elif "sad" in text:
+        return "sadness"
+    return "neutral"
+
+# Type classification
+def classify_type(text):
+    text = text.lower()
+    if "kill" in text or "threat" in text:
+        return "Threat"
+    elif "stupid" in text or "idiot" in text:
+        return "Verbal"
+    elif "ignore" in text:
+        return "Exclusion"
+    return "General"
+
+# Frequency logic
+def get_frequency(freq, duration, text):
+    if freq >= 5 or "always" in text:
         return "HIGH"
-    elif label == "NEGATIVE":
+    elif freq >= 2 or "again" in text:
         return "MEDIUM"
     return "LOW"
 
+# Severity
+def calculate_severity(toxicity, b_type):
+    if toxicity > 0.8 or b_type == "Threat":
+        return "HIGH"
+    elif toxicity > 0.4:
+        return "MEDIUM"
+    return "LOW"
+
+# Action
 def get_action(severity):
     if severity == "HIGH":
         return "Immediate intervention"
@@ -59,77 +99,83 @@ def get_action(severity):
         return "Counselor session"
     return "Monitor"
 
-def simple_summary(text):
-    return text[:100]
+# Summary
+def summarize(text):
+    return text[:120]
 
-# ---------------- INPUT UI ----------------
+# Email alert
+def send_email(summary, severity):
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login("your@gmail.com", "your_app_password")
+
+        msg = f"Subject: Cyberbullying Alert\n\nSeverity: {severity}\n\n{summary}"
+        server.sendmail("your@gmail.com", "counselor@gmail.com", msg)
+        server.quit()
+    except:
+        pass
+
+# ---------------- INPUT ----------------
+
 col1, col2 = st.columns(2)
 
 with col1:
-    text = st.text_area("📝 Enter Report")
+    text = st.text_area("Enter Report")
+    image = st.file_uploader("Upload Image", type=["png","jpg"])
 
 with col2:
-    st.markdown("### ℹ️ Instructions")
-    st.write("Describe the incident clearly. System will analyze risk level.")
+    frequency = st.slider("Frequency", 1, 10, 1)
+    duration = st.selectbox("Duration", ["days", "weeks", "months"])
 
-# ---------------- ANALYZE ----------------
-if st.button("🔍 Analyze"):
-    if text.strip() == "":
-        st.warning("Please enter a report")
-    else:
-        clean = anonymize(text)
+# ---------------- PROCESS ----------------
 
-        result = classifier(clean)[0]
-        severity = calculate_severity(result['label'], result['score'])
+if st.button("Analyze"):
+    extracted = ""
 
-        summary = simple_summary(clean)
-        action = get_action(severity)
+    if image:
+        extracted = extract_text_from_image(image)
 
-        cursor.execute("""
-        INSERT INTO reports (text, severity, summary, action, timestamp)
-        VALUES (?, ?, ?, ?, ?)
-        """, (clean, severity, summary, action, str(datetime.now())))
-        conn.commit()
+    final_text = text + " " + extracted
+    clean = anonymize(final_text)
 
-        st.subheader("📊 Analysis Result")
+    toxicity = get_toxicity(clean)
+    emotion = get_emotion(clean)
+    b_type = classify_type(clean)
+    freq_level = get_frequency(frequency, duration, clean)
+    severity = calculate_severity(toxicity, b_type)
+    summary = summarize(clean)
+    action = get_action(severity)
 
-        colA, colB, colC = st.columns(3)
+    if severity == "HIGH":
+        send_email(summary, severity)
 
-        with colA:
-            st.metric("Severity", severity)
+    # Save to DB
+    cursor.execute("""
+    INSERT INTO reports (text, type, toxicity, emotion, severity, frequency, summary, action, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (clean, b_type, toxicity, emotion, severity, freq_level, summary, action, str(datetime.now())))
+    conn.commit()
 
-        with colB:
-            st.metric("Confidence", round(result['score'], 2))
+    # ---------------- OUTPUT ----------------
+    st.subheader("📊 Results")
 
-        with colC:
-            st.metric("Action", action)
+    st.write("**Type:**", b_type)
+    st.write("**Toxicity:**", round(toxicity,2))
+    st.write("**Emotion:**", emotion)
+    st.write("**Frequency:**", freq_level)
+    st.write("**Severity:**", severity)
+    st.write("**Summary:**", summary)
+    st.write("**Action:**", action)
 
-        if severity == "HIGH":
-            st.error("🚨 Immediate Attention Required")
-        elif severity == "MEDIUM":
-            st.warning("⚠️ Monitor & Counsel")
-        else:
-            st.success("✅ Low Risk")
-
-        st.write("### 🧾 Summary")
-        st.info(summary)
+    if severity == "HIGH":
+        st.error("🚨 HIGH RISK ALERT")
 
 # ---------------- DASHBOARD ----------------
-st.subheader("📊 Incident Dashboard")
+
+st.subheader("📊 Counselor Dashboard")
 
 rows = cursor.execute("SELECT * FROM reports").fetchall()
 
-high = sum(1 for r in rows if r[2] == "HIGH")
-medium = sum(1 for r in rows if r[2] == "MEDIUM")
-low = sum(1 for r in rows if r[2] == "LOW")
-
-col1, col2, col3 = st.columns(3)
-
-col1.metric("🔴 High", high)
-col2.metric("🟡 Medium", medium)
-col3.metric("🟢 Low", low)
-
-st.markdown("### 📜 Recent Reports")
-
-for row in rows[-5:][::-1]:
-    st.write(f"🕒 {row[5]} | **{row[2]}** | {row[3]}")
+for r in rows[::-1][:10]:
+    st.write(f"{r[9]} | {r[2]} | {r[5]} | {r[7]}")
