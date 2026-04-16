@@ -14,7 +14,7 @@ import easyocr
 # ==========================================
 # 🔑 INBUILT CONFIGURATION & BRANDING
 # ==========================================
-HF_API_KEY = "hf_PASTE_YOUR_TOKEN_HERE"  # Use your Hugging Face Token
+HF_API_KEY = "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"  # Use your Hugging Face Token
 C_USER, C_PASS = "admin", "SafeSchool2026"
 
 # Email Configuration (SMTP)
