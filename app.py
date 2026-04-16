@@ -1,74 +1,41 @@
 import streamlit as st
 from transformers import pipeline
-import pandas as pd
 import re
-import os
 
-# Fix tokenizer warning
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+st.title("🚨 Cyberbullying Incident Analyzer")
 
-# -----------------------------
-# PAGE CONFIG
-# -----------------------------
-st.set_page_config(
-    page_title="AI Bullying Detection System",
-    page_icon="🛡️",
-    layout="centered"
-)
+# ---------------- MODELS ----------------
+classifier = pipeline("text-classification", model="unitary/toxic-bert")
+emotion_model = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base")
+summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
 
-# -----------------------------
-# LOAD MODELS (LIGHTWEIGHT)
-# -----------------------------
-@st.cache_resource
-def load_models():
-    classifier = pipeline(
-        "sentiment-analysis",
-        model="distilbert-base-uncased-finetuned-sst-2-english"
-    )
+# ---------------- INPUT ----------------
+text = st.text_area("Enter Report")
+frequency = st.slider("Frequency", 1, 10, 1)
+duration = st.slider("Duration (days)", 1, 30, 1)
 
-    summarizer = pipeline(
-        "text-generation",
-        model="google/flan-t5-small"   # ⚡ faster + deploy-safe
-    )
-
-    return classifier, summarizer
-
-classifier, summarizer = load_models()
-
-# -----------------------------
-# SIDEBAR
-# -----------------------------
-st.sidebar.title("⚙️ Settings")
-st.sidebar.write("AI-powered bullying detection system")
-
-frequency = st.sidebar.slider("Frequency", 1, 10, 1)
-duration = st.sidebar.slider("Duration", 1, 10, 1)
-
-# -----------------------------
-# FUNCTIONS
-# -----------------------------
+# ---------------- FUNCTIONS ----------------
 def mask_pii(text):
     text = re.sub(r'\b[A-Z][a-z]{2,}\b', '[NAME]', text)
     text = re.sub(r'\b\d{10}\b', '[PHONE]', text)
-    text = re.sub(r'\S+@\S+', '[EMAIL]', text)
     return text
 
 def classify_type(text):
     text = text.lower()
-
     if any(w in text for w in ["kill", "hurt", "beat", "threat"]):
         return "Threats"
-    elif any(w in text for w in ["ignore", "exclude", "left out"]):
+    elif any(w in text for w in ["ignore", "exclude"]):
         return "Social Exclusion"
-    elif any(w in text for w in ["touch", "body", "sexual"]):
-        return "Sexual"
-    elif any(w in text for w in ["ugly", "stupid", "loser", "idiot"]):
+    elif any(w in text for w in ["stupid", "idiot", "loser"]):
         return "Verbal"
-
+    elif any(w in text for w in ["touch", "sexual"]):
+        return "Sexual"
     return "Verbal"
 
-def calculate_severity(toxicity_score, frequency, duration):
-    score = (toxicity_score * 0.5) + (frequency * 0.3) + (duration * 0.2)
+def calculate_severity(toxicity, frequency, duration):
+    frequency = min(frequency/10, 1)
+    duration = min(duration/30, 1)
+    score = (toxicity * 0.5) + (frequency * 0.3) + (duration * 0.2)
 
     if score > 0.7:
         return "HIGH"
@@ -76,82 +43,49 @@ def calculate_severity(toxicity_score, frequency, duration):
         return "MEDIUM"
     return "LOW"
 
+def detect_pattern(frequency, duration):
+    if frequency > 3 and duration > 5:
+        return "Repeated bullying detected"
+    return "No strong pattern"
+
 def recommend_action(b_type, severity):
     if b_type == "Sexual":
-        return "Mandatory escalation (Protocol Section D)"
+        return "Mandatory escalation (Protocol D)"
     if b_type == "Threats" and severity == "HIGH":
-        return "Immediate escalation (Protocol Section C)"
+        return "Immediate escalation (Protocol C)"
     if severity == "MEDIUM":
-        return "Counselor session (Protocol Section B)"
-    return "Monitor situation (Protocol Section A)"
+        return "Counselor session (Protocol B)"
+    return "Monitor (Protocol A)"
 
-def generate_summary(text):
-    try:
-        prompt = f"Summarize this bullying report:\n{text}"
-        result = summarizer(prompt, max_length=80, do_sample=False)
-        return result[0]['generated_text']
-    except:
-        return "Summary not available"
+# ---------------- ANALYZE ----------------
+if st.button("Analyze"):
+    clean = mask_pii(text)
 
-# -----------------------------
-# UI MAIN
-# -----------------------------
-st.title("🛡️ AI Bullying Detection System")
-st.markdown("### Analyze reports using AI")
+    result = classifier(clean)[0]
+    toxicity = result['score']
 
-text = st.text_area("📝 Enter Complaint / Report")
+    b_type = classify_type(clean)
+    severity = calculate_severity(toxicity, frequency, duration)
 
-if st.button("🔍 Analyze Report"):
+    emotion = emotion_model(clean)[0]['label']
+    pattern = detect_pattern(frequency, duration)
 
-    if text.strip() == "":
-        st.warning("Please enter some text")
+    summary = summarizer(clean, max_length=60, min_length=20, do_sample=False)[0]['summary_text']
+
+    action = recommend_action(b_type, severity)
+
+    # ---------------- OUTPUT ----------------
+    st.subheader("Results")
+
+    if severity == "HIGH":
+        st.error("HIGH RISK 🚨")
+    elif severity == "MEDIUM":
+        st.warning("MEDIUM RISK ⚠️")
     else:
-        clean_text = mask_pii(text)
+        st.success("LOW RISK ✅")
 
-        result = classifier(clean_text)[0]
-        toxicity_score = result['score'] if result['label'] == 'NEGATIVE' else 0
-
-        b_type = classify_type(clean_text)
-        severity = calculate_severity(toxicity_score, frequency, duration)
-        summary = generate_summary(clean_text)
-        action = recommend_action(b_type, severity)
-
-        # -----------------------------
-        # DISPLAY RESULTS
-        # -----------------------------
-        st.subheader("📊 Analysis Results")
-
-        st.write("**Masked Text:**", clean_text)
-        st.write("**Toxicity Score:**", round(toxicity_score, 2))
-        st.write("**Bullying Type:**", b_type)
-
-        # Severity color
-        if severity == "HIGH":
-            st.error(f"🚨 Severity: {severity}")
-        elif severity == "MEDIUM":
-            st.warning(f"⚠️ Severity: {severity}")
-        else:
-            st.success(f"✅ Severity: {severity}")
-
-        st.write("**Summary:**", summary)
-        st.write("**Recommended Action:**", action)
-
-        # -----------------------------
-        # DOWNLOAD REPORT
-        # -----------------------------
-        data = {
-            "Text": [text],
-            "Masked": [clean_text],
-            "Type": [b_type],
-            "Severity": [severity],
-            "Action": [action]
-        }
-
-        df = pd.DataFrame(data)
-
-        st.download_button(
-            label="📥 Download Report (CSV)",
-            data=df.to_csv(index=False),
-            file_name="bullying_report.csv",
-            mime="text/csv"
-        )
+    st.write("**Type:**", b_type)
+    st.write("**Emotion:**", emotion)
+    st.write("**Pattern:**", pattern)
+    st.write("**Summary:**", summary)
+    st.write("**Action:**", action)
