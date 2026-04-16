@@ -1,5 +1,4 @@
 streamlit
 transformers==4.38.2
-torch==2.2.0
-pillow
-pytesseract
+torch
+Pillow
