@@ -1,4 +1,4 @@
-```python
+
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -232,4 +232,4 @@ elif st.session_state.view == "Staff":
         st.write("Severity:", row["severity"])
         st.write("Emotion:", row["emotion"])
         st.write("Summary:", row["summary"])
-```
+
