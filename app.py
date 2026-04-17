@@ -1,11 +1,8 @@
-
 import streamlit as st
 import pandas as pd
 import sqlite3
 import re
 import requests
-import smtplib
-from email.message import EmailMessage
 from datetime import datetime
 from PIL import Image
 import numpy as np
@@ -13,13 +10,13 @@ import easyocr
 import random
 
 # ==========================================
-# 🔑 CONFIG
+# 🔑 CORE CONFIGURATION
 # ==========================================
-HF_API_KEY = "YOUR_HF_API_KEY"
+HF_API_KEY = "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"
 C_USER, C_PASS = "admin", "SafeSchool2026"
 
 # ==========================================
-# 🏗️ BACKEND
+# 🏗️ BACKEND: RESOURCE CACHING
 # ==========================================
 @st.cache_resource
 def init_db():
@@ -30,206 +27,160 @@ def init_db():
 
 @st.cache_resource
 def load_ocr_engine():
+    # Cache prevents memory overflow
     return easyocr.Reader(['en'], gpu=False)
 
-# 🔥 FIXED OCR
-def extract_text_from_images(imgs, reader):
-    ocr_text = ""
-    if imgs:
-        for img in imgs:
-            try:
-                image = np.array(Image.open(img).convert("RGB"))
-                result = reader.readtext(image, detail=0, paragraph=True)
-                ocr_text += " " + " ".join(result)
-            except Exception as e:
-                print("OCR Error:", e)
-    return ocr_text.strip()
+def trigger_counselor_alarm(level, message):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect('safeschool_pro.db', check_same_thread=False) as conn:
+        conn.execute("INSERT INTO incidents (ts, platform, type, severity, emotion, summary, status, score) VALUES (?,?,?,?,?,?,?,?)",
+                     (ts, "INTERNAL", "ALARM", level, "Panic", message, "🚨 UNREAD ALARM", 1.0))
 
-# ==========================================
-# AI MODELS
-# ==========================================
 def call_ai_models(text):
-    if not text.strip(): 
+    if not text.strip():
         return 0.0, "neutral"
-
+    
     headers = {"Authorization": f"Bearer {HF_API_KEY}"}
-
+    tox_api = "https://api-inference.huggingface.co/models/unitary/toxic-bert"
+    emo_api = "https://api-inference.huggingface.co/models/j-hartmann/emotion-english-distilroberta-base"
+    
     try:
-        tox = requests.post(
-            "https://api-inference.huggingface.co/models/unitary/toxic-bert",
-            headers=headers, json={"inputs": text}
-        ).json()
+        # Increase timeout to 20s to prevent 'Neutral' defaults on slow API warmups
+        t_res = requests.post(tox_api, headers=headers, json={"inputs": text}, timeout=20).json()
+        e_res = requests.post(emo_api, headers=headers, json={"inputs": text}, timeout=20).json()
+        
+        # Extract score safely
+        score = t_res[0][0]['score']
+        label = e_res[0][0]['label']
+        return score, label
+    except Exception:
+        return 0.0, "Analysis Pending"
 
-        emo = requests.post(
-            "https://api-inference.huggingface.co/models/j-hartmann/emotion-english-distilroberta-base",
-            headers=headers, json={"inputs": text}
-        ).json()
-
-        return tox[0][0]['score'], emo[0][0]['label']
-    except:
-        return 0.1, "neutral"
-
-# ==========================================
-# LOGIC FIXES
-# ==========================================
 def anonymize(text):
     text = re.sub(r'\S+@\S+', '[EMAIL]', text)
     text = re.sub(r'\d{10}', '[PHONE]', text)
     return re.sub(r'\b[A-Z][a-z]+ [A-Z][a-z]+\b', '[NAME]', text)
 
-# 🔥 IMPROVED CLASSIFICATION
-def analyze_severity_and_type(text, tox):
-    t = text.lower()
+# ==========================================
+# 🎨 UI & BRANDING
+# ==========================================
+st.set_page_config(page_title="SafeSchool AI | Pro", page_icon="🛡️", layout="wide")
 
-    threat_words = ["kill", "hurt", "die", "threat"]
-    abuse_words = ["stupid", "idiot", "useless", "loser"]
-
-    if any(w in t for w in threat_words):
-        return "Threat", "HIGH"
-    elif any(w in t for w in abuse_words):
-        return "Verbal Abuse", "MEDIUM"
-    elif tox > 0.7:
-        return "Toxic", "MEDIUM"
-    else:
-        return "General", "LOW"
-
-# 🔥 BETTER SUMMARY
-def generate_summary(text):
-    parts = text.split(".")
-    summary = ". ".join(parts[:2]).strip()
-    return summary if summary else text[:150]
+st.markdown("""
+    <style>
+    .stApp { background-color: #0f172a; color: #f8fafc; }
+    .feature-card {
+        background: rgba(255, 255, 255, 0.03); padding: 30px; border-radius: 20px;
+        border: 1px solid rgba(255, 255, 255, 0.1); margin-bottom: 20px;
+    }
+    .stButton>button {
+        background: linear-gradient(90deg, #2563eb 0%, #3b82f6 100%);
+        color: white; font-weight: 700; border-radius: 12px;
+    }
+    .emergency-btn button { background: #dc2626 !important; }
+    .motivation-box {
+        padding: 20px; background: rgba(37, 99, 235, 0.1); 
+        border-left: 4px solid #3b82f6; border-radius: 10px; color: #93c5fd;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 # ==========================================
-# UI (UNCHANGED)
+# 🚦 ROUTING
 # ==========================================
-st.set_page_config(page_title="SafeSchool AI | Pro", layout="wide")
-
 init_db()
 reader = load_ocr_engine()
 
-if 'view' not in st.session_state:
-    st.session_state.view = "Home"
+if 'view' not in st.session_state: st.session_state.view = "Home"
 
-# ==========================================
-# HOME
-# ==========================================
 if st.session_state.view == "Home":
+    st.markdown("<h1 style='text-align:center;'>🛡️ SafeSchool AI</h1>", unsafe_allow_html=True)
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("<div class='feature-card'><h3>Student Portal</h3><p>Secure Anonymous Reporting</p></div>", unsafe_allow_html=True)
+        if st.button("🚀 Open Terminal"): st.session_state.view = "Student"; st.rerun()
+    with col_b:
+        st.markdown("<div class='feature-card'><h3>Administration</h3><p>Staff Login</p></div>", unsafe_allow_html=True)
+        u, p = st.text_input("Staff ID"), st.text_input("Key", type="password")
+        if st.button("🔒 Login"):
+            if u == C_USER and p == C_PASS: st.session_state.view = "Staff"; st.rerun()
 
-    st.title("🛡️ SafeSchool AI")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        if st.button("🚀 Student Portal"):
-            st.session_state.view = "Student"
-            st.rerun()
-
-    with col2:
-        user = st.text_input("Staff ID")
-        pwd = st.text_input("Password", type="password")
-
-        if st.button("Login"):
-            if user == C_USER and pwd == C_PASS:
-                st.session_state.view = "Staff"
-                st.rerun()
-
-# ==========================================
-# STUDENT
-# ==========================================
 elif st.session_state.view == "Student":
+    if st.sidebar.button("🏠 Exit"): st.session_state.view = "Home"; st.rerun()
+    st.markdown("<div class='motivation-box'>Every report helps build a safer school environment.</div>", unsafe_allow_html=True)
 
-    if st.sidebar.button("Back"):
-        st.session_state.view = "Home"
-        st.rerun()
+    # 1. INCIDENT ANALYSIS (TOP)
+    st.markdown("<div class='feature-card'>", unsafe_allow_html=True)
+    st.markdown("### 📝 Incident Analysis Terminal")
+    msg_input = st.text_area("What happened?")
+    uploaded_files = st.file_uploader("Evidence (Chat Screenshots)", accept_multiple_files=True)
+    
+    col_1, col_2 = st.columns(2)
+    platform = col_1.selectbox("Platform", ["WhatsApp", "Instagram", "Discord", "Snapchat", "Other"])
+    frequency = col_2.selectbox("Frequency", ["Once", "Repeat Offense", "Constant Bullying"])
+    
+    if st.button("Analyze & Secure Report"):
+        with st.status("🚀 AI Analysis in Progress...") as status:
+            ocr_text = ""
+            if uploaded_files:
+                for uploaded_file in uploaded_files:
+                    img = Image.open(uploaded_file)
+                    # Use numpy for OCR processing
+                    res = reader.readtext(np.array(img))
+                    ocr_text += " " + " ".join([r[1] for r in res])
+            
+            # THE FIX: Merge message box text with image text
+            combined_text = msg_input + " " + ocr_text
+            anonymized_text = anonymize(combined_text)
+            
+            # Call AI with the combined data
+            toxicity_score, emotion_label = call_ai_models(anonymized_text)
+            
+            # Determine Severity based on score AND frequency
+            if toxicity_score > 0.75 or frequency == "Constant Bullying":
+                final_severity = "HIGH"
+            elif toxicity_score > 0.4:
+                final_severity = "MEDIUM"
+            else:
+                final_severity = "LOW"
+            
+            if final_severity == "HIGH":
+                trigger_counselor_alarm("CRITICAL", "High Toxicity Incident Reported")
 
-    st.subheader("Report Incident")
+            # Save to Database
+            with sqlite3.connect('safeschool_pro.db', check_same_thread=False) as conn:
+                conn.execute("INSERT INTO incidents (ts, platform, type, severity, emotion, summary, status, score) VALUES (?,?,?,?,?,?,?,?)",
+                             (datetime.now().strftime("%Y-%m-%d %H:%M"), platform, frequency, final_severity, emotion_label, anonymized_text[:400], "Pending", toxicity_score))
+            
+            status.update(label="Report Secured!", state="complete")
+            
+            # USER RECEIPT (Confirmation for the Student)
+            st.divider()
+            st.subheader("📄 Report Receipt (Private)")
+            st.write(f"**Severity Level:** {final_severity}")
+            st.write(f"**Emotion Analysis:** {emotion_label.capitalize()}")
+            st.write(f"**Processed Text:** {anonymized_text[:150]}...")
+            st.success("Your report has been submitted anonymously. Thank you for speaking up.")
+            st.balloons()
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    msg = st.text_area("Enter details")
-    imgs = st.file_uploader("Upload screenshots", accept_multiple_files=True)
+    # 2. EMERGENCY BUTTONS (BOTTOM)
+    st.subheader("🆘 Crisis Support")
+    c_e1, c_e2 = st.columns(2)
+    with c_e1:
+        st.markdown('<div class="emergency-btn">', unsafe_allow_html=True)
+        if st.button("🚨 IMMEDIATE HELP"):
+            trigger_counselor_alarm("CRITICAL", "Manual Immediate Help Request")
+            st.error("Alarm triggered. A counselor has been notified.")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with c_e2:
+        if st.button("🤝 REQUEST PRIORITY CALL"):
+            trigger_counselor_alarm("HIGH", "Call Request Logged")
+            st.success("Request logged for a counselor call-back.")
 
-    platform = st.selectbox("Platform", ["WhatsApp", "Instagram", "Other"])
-
-    if st.button("Analyze & Submit"):
-
-        # OCR FIX
-        ocr_text = extract_text_from_images(imgs, reader)
-
-        full_text = (msg or "") + " " + ocr_text
-
-        if not full_text.strip():
-            st.error("Enter text or upload image")
-            st.stop()
-
-        clean = anonymize(full_text)
-
-        tox, emo = call_ai_models(clean)
-
-        # 🔥 NEW LOGIC
-        b_type, severity = analyze_severity_and_type(clean, tox)
-
-        summary = generate_summary(clean)
-
-        # SAVE
-        with sqlite3.connect('safeschool_pro.db') as conn:
-            conn.execute("""
-                INSERT INTO incidents 
-                (ts, platform, type, severity, emotion, summary, status, score)
-                VALUES (?,?,?,?,?,?,?,?)
-            """, (
-                datetime.now().strftime("%Y-%m-%d %H:%M"),
-                platform,
-                b_type,
-                severity,
-                emo,
-                summary,
-                "Pending",
-                float(tox)
-            ))
-
-        # 🔥 STUDENT REPORT OUTPUT
-        st.success("Report submitted successfully")
-
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Type", b_type)
-        col2.metric("Severity", severity)
-        col3.metric("Emotion", emo)
-
-        st.info(summary)
-
-        st.progress(min(float(tox), 1.0))
-
-        if severity == "HIGH":
-            st.error("🚨 Serious issue detected")
-        elif severity == "MEDIUM":
-            st.warning("⚠️ Needs attention")
-        else:
-            st.success("Logged safely")
-
-        st.write("🔒 Your identity is protected")
-
-# ==========================================
-# STAFF
-# ==========================================
 elif st.session_state.view == "Staff":
-
-    if st.sidebar.button("Logout"):
-        st.session_state.view = "Home"
-        st.rerun()
-
-    st.title("📊 Dashboard")
-
-    with sqlite3.connect('safeschool_pro.db') as conn:
+    st.sidebar.button("🚪 Logout", on_click=lambda: st.session_state.update({"view": "Home"}))
+    st.title("📊 Safety Command Center")
+    with sqlite3.connect('safeschool_pro.db', check_same_thread=False) as conn:
         df = pd.read_sql_query("SELECT * FROM incidents ORDER BY id DESC", conn)
-
-    st.dataframe(df)
-
-    if not df.empty:
-        st.subheader("Latest Incident")
-
-        row = df.iloc[0]
-
-        st.write("Type:", row["type"])
-        st.write("Severity:", row["severity"])
-        st.write("Emotion:", row["emotion"])
-        st.write("Summary:", row["summary"])
-
+    st.dataframe(df, use_container_width=True, hide_index=True)
